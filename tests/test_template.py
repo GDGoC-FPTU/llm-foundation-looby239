@@ -1,278 +1,243 @@
 """
 Day 1 — LLM API Foundation
-Test suite for student solution.
+Test suite for student solutions and master keys.
 
-Run from the day folder:
+Run from the 02-lab/ folder:
     pytest tests/ -v
 
-All external API calls are mocked — no real API keys required.
+All external API calls are mocked — no real API keys or internet connection required.
 """
 
 import importlib.util
+import os
 import sys
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-DAY_DIR = Path(__file__).parent.parent
-SOLUTION_DIR = DAY_DIR / "solution"
+# Locate directories relative to this test file
+TESTS_DIR = Path(__file__).parent
+LAB_DIR = TESTS_DIR.parent
 
+# Resolve module paths
+SOLUTION_PATH = LAB_DIR / "solution-code" / "solution.py"
+TEMPLATE_PATH = LAB_DIR / "starter-code" / "template.py"
 
-def _load(path: Path, unique_name: str):
+def _load_module(path: Path, unique_name: str):
+    if not path.exists():
+        raise FileNotFoundError(f"Target file not found at: {path}")
     spec = importlib.util.spec_from_file_location(unique_name, str(path))
     mod = importlib.util.module_from_spec(spec)
     sys.modules[unique_name] = mod
-
-    # Ensure the top-level package exists for hyphenated folder names
-    if "." in unique_name:
-        package_name, module_name = unique_name.split(".", 1)
-        if package_name not in sys.modules:
-            pkg = types.ModuleType(package_name)
-            pkg.__name__ = package_name
-            pkg.__path__ = []
-            sys.modules[package_name] = pkg
-        else:
-            pkg = sys.modules[package_name]
-        setattr(pkg, module_name, mod)
-
     spec.loader.exec_module(mod)
     return mod
 
 
-if (SOLUTION_DIR / "solution.py").exists():
-    _m = _load(SOLUTION_DIR / "solution.py", f"{DAY_DIR.name}.solution")
-elif (SOLUTION_DIR / "app.py").exists():
-    _m = _load(SOLUTION_DIR / "app.py", f"{DAY_DIR.name}.solution")
+# Dynamically load the solution module if it exists (for grading), otherwise test the starter template
+if SOLUTION_PATH.exists():
+    _m = _load_module(SOLUTION_PATH, "solution")
 else:
-    src = "template.py" if (DAY_DIR / "template.py").exists() else "app.py"
-    _m = _load(DAY_DIR / src, f"{DAY_DIR.name}.template")
+    _m = _load_module(TEMPLATE_PATH, "template")
 
-call_openai = getattr(_m, 'call_openai')
-call_openai_mini = getattr(_m, 'call_openai_mini')
-compare_models = getattr(_m, 'compare_models')
-streaming_chatbot = getattr(_m, 'streaming_chatbot')
+# Import target functions
+call_openai = getattr(_m, "call_openai")
+call_gemini = getattr(_m, "call_gemini")
+call_anthropic = getattr(_m, "call_anthropic")
+compare_models = getattr(_m, "compare_models")
+streaming_chatbot = getattr(_m, "streaming_chatbot")
+retry_with_backoff = getattr(_m, "retry_with_backoff")
+batch_compare = getattr(_m, "batch_compare")
+format_comparison_table = getattr(_m, "format_comparison_table")
 
 
+# ---------------------------------------------------------------------------
+# Mock Generators
+# ---------------------------------------------------------------------------
 def _make_openai_response(text: str = "Hello from OpenAI"):
-    """Create a minimal mock that looks like an OpenAI ChatCompletion response."""
     choice = MagicMock()
     choice.message.content = text
     resp = MagicMock()
     resp.choices = [choice]
+    usage = MagicMock()
+    usage.prompt_tokens = 10
+    usage.completion_tokens = 20
+    resp.usage = usage
+    return resp
+
+
+def _make_gemini_response(text: str = "Hello from Gemini"):
+    resp = MagicMock()
+    resp.text = text
+    usage = MagicMock()
+    usage.prompt_token_count = 12
+    usage.candidates_token_count = 25
+    resp.usage_metadata = usage
+    return resp
+
+
+def _make_anthropic_response(text: str = "Hello from Anthropic"):
+    resp = MagicMock()
+    content_part = MagicMock()
+    content_part.text = text
+    resp.content = [content_part]
+    usage = MagicMock()
+    usage.input_tokens = 15
+    usage.output_tokens = 30
+    resp.usage = usage
     return resp
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Test Cases
 # ---------------------------------------------------------------------------
-
 class TestCallOpenAI(unittest.TestCase):
 
     @patch("openai.OpenAI")
-    def test_returns_non_empty_string(self, MockOpenAI):
+    def test_openai_returns_tuple_structure(self, MockOpenAI):
         mock_client = MagicMock()
         MockOpenAI.return_value = mock_client
-        mock_client.chat.completions.create.return_value = _make_openai_response("Test response")
+        mock_client.chat.completions.create.return_value = _make_openai_response("OpenAI Mock Response")
 
-        result, latency = call_openai("Hello")
+        text, latency, usage = call_openai("Hello")
 
-        self.assertIsInstance(result, str)
-        self.assertGreater(len(result), 0)
-
-    @patch("openai.OpenAI")
-    def test_latency_is_positive_float(self, MockOpenAI):
-        mock_client = MagicMock()
-        MockOpenAI.return_value = mock_client
-        mock_client.chat.completions.create.return_value = _make_openai_response()
-
-        _, latency = call_openai("Hello")
-
+        self.assertEqual(text, "OpenAI Mock Response")
         self.assertIsInstance(latency, float)
-        self.assertGreater(latency, 0.0)
+        self.assertGreaterEqual(latency, 0.0)
+        self.assertEqual(usage["input_tokens"], 10)
+        self.assertEqual(usage["output_tokens"], 20)
 
-    @patch("openai.OpenAI")
-    def test_returns_tuple_of_two(self, MockOpenAI):
+
+class TestCallGemini(unittest.TestCase):
+
+    @patch("google.genai.Client")
+    def test_gemini_returns_tuple_structure_new_sdk(self, MockGenAIClient):
         mock_client = MagicMock()
-        MockOpenAI.return_value = mock_client
-        mock_client.chat.completions.create.return_value = _make_openai_response()
+        MockGenAIClient.return_value = mock_client
+        mock_client.models.generate_content.return_value = _make_gemini_response("Gemini Mock Response")
 
-        result = call_openai("Hello")
+        text, latency, usage = call_gemini("Hello")
 
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
-
-
-class TestCallOpenAIMini(unittest.TestCase):
-
-    @patch("openai.OpenAI")
-    def test_returns_non_empty_string(self, MockOpenAI):
-        mock_client = MagicMock()
-        MockOpenAI.return_value = mock_client
-        mock_client.chat.completions.create.return_value = _make_openai_response("Test response")
-
-        result, latency = call_openai_mini("Hello")
-
-        self.assertIsInstance(result, str)
-        self.assertGreater(len(result), 0)
-
-    @patch("openai.OpenAI")
-    def test_latency_is_positive_float(self, MockOpenAI):
-        mock_client = MagicMock()
-        MockOpenAI.return_value = mock_client
-        mock_client.chat.completions.create.return_value = _make_openai_response()
-
-        _, latency = call_openai_mini("Hello")
-
+        self.assertEqual(text, "Gemini Mock Response")
         self.assertIsInstance(latency, float)
-        self.assertGreater(latency, 0.0)
+        self.assertGreaterEqual(latency, 0.0)
+        self.assertEqual(usage["input_tokens"], 12)
+        self.assertEqual(usage["output_tokens"], 25)
 
-    @patch("openai.OpenAI")
-    def test_returns_tuple_of_two(self, MockOpenAI):
+
+class TestCallAnthropic(unittest.TestCase):
+
+    @patch("anthropic.Anthropic")
+    def test_anthropic_returns_tuple_structure(self, MockAnthropic):
         mock_client = MagicMock()
-        MockOpenAI.return_value = mock_client
-        mock_client.chat.completions.create.return_value = _make_openai_response()
+        MockAnthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response("Claude Mock Response")
 
-        result = call_openai_mini("Hello")
+        text, latency, usage = call_anthropic("Hello")
 
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
+        self.assertEqual(text, "Claude Mock Response")
+        self.assertIsInstance(latency, float)
+        self.assertGreaterEqual(latency, 0.0)
+        self.assertEqual(usage["input_tokens"], 15)
+        self.assertEqual(usage["output_tokens"], 30)
 
 
 class TestCompareModels(unittest.TestCase):
 
-    def test_returns_dict_with_required_keys(self):
-        with patch(f"{compare_models.__module__}.call_openai", return_value=("GPT-4o answer", 0.5)), \
-             patch(f"{compare_models.__module__}.call_openai_mini", return_value=("Mini answer", 0.3)):
-            result = compare_models("Test prompt")
+    def test_compare_models_evaluates_correct_costs(self):
+        with patch.object(_m, "call_openai") as mock_openai, \
+             patch.object(_m, "call_gemini") as mock_gemini:
 
-        required_keys = {
-            "gpt4o_response",
-            "mini_response",
-            "gpt4o_latency",
-            "mini_latency",
-            "gpt4o_cost_estimate",
-        }
-        self.assertIsInstance(result, dict)
-        for key in required_keys:
-            self.assertIn(key, result, f"Missing key: {key}")
+            # Setup mock returns
+            mock_openai.side_effect = [
+                ("GPT-4o Response", 0.5, {"input_tokens": 10, "output_tokens": 20}),       # 1st call: gpt-4o
+                ("GPT-4o-Mini Response", 0.3, {"input_tokens": 10, "output_tokens": 20}),  # 2nd call: gpt-4o-mini
+            ]
+            mock_gemini.return_value = (
+                "Gemini Response",
+                0.4,
+                {"input_tokens": 10, "output_tokens": 20}
+            )
 
-    def test_latency_values_are_positive(self):
-        with patch(f"{compare_models.__module__}.call_openai", return_value=("GPT-4o answer", 0.5)), \
-             patch(f"{compare_models.__module__}.call_openai_mini", return_value=("Mini answer", 0.3)):
-            result = compare_models("Test prompt")
+            result = compare_models("Prompt")
 
-        self.assertGreater(result["gpt4o_latency"], 0)
-        self.assertGreater(result["mini_latency"], 0)
+            # Verify keys exist
+            self.assertIn("gpt4o", result)
+            self.assertIn("gpt4o_mini", result)
+            self.assertIn("gemini_flash", result)
 
-    def test_responses_are_non_empty_strings(self):
-        with patch(f"{compare_models.__module__}.call_openai", return_value=("GPT-4o answer", 0.5)), \
-             patch(f"{compare_models.__module__}.call_openai_mini", return_value=("Mini answer", 0.3)):
-            result = compare_models("Test prompt")
+            # Verify exact cost calculations
+            # gpt-4o: (10 * 5.0 + 20 * 20.0) / 1,000,000 = 0.00045
+            self.assertAlmostEqual(result["gpt4o"]["cost"], 0.00045, places=8)
 
-        self.assertIsInstance(result["gpt4o_response"], str)
-        self.assertGreater(len(result["gpt4o_response"]), 0)
-        self.assertIsInstance(result["mini_response"], str)
-        self.assertGreater(len(result["mini_response"]), 0)
+            # gpt-4o-mini: (10 * 0.150 + 20 * 0.600) / 1,000,000 = 0.0000135
+            self.assertAlmostEqual(result["gpt4o_mini"]["cost"], 0.0000135, places=8)
 
-    def test_cost_estimate_is_non_negative(self):
-        with patch(f"{compare_models.__module__}.call_openai", return_value=("word " * 100, 0.5)), \
-             patch(f"{compare_models.__module__}.call_openai_mini", return_value=("word " * 100, 0.3)):
-            result = compare_models("Test prompt")
+            # gemini-2.5-flash: (10 * 0.075 + 20 * 0.300) / 1,000,000 = 0.00000675
+            self.assertAlmostEqual(result["gemini_flash"]["cost"], 0.00000675, places=8)
 
-        self.assertGreaterEqual(result["gpt4o_cost_estimate"], 0)
+
+class TestRetryWithBackoff(unittest.TestCase):
+
+    def test_succeeds_immediately(self):
+        val = retry_with_backoff(lambda: "success")
+        self.assertEqual(val, "success")
+
+    def test_succeeds_after_retries(self):
+        state = {"attempts": 0}
+
+        def flaky_fn():
+            state["attempts"] += 1
+            if state["attempts"] < 3:
+                raise ValueError("Fail")
+            return "ok"
+
+        val = retry_with_backoff(flaky_fn, max_retries=3, base_delay=0.001)
+        self.assertEqual(val, "ok")
+        self.assertEqual(state["attempts"], 3)
+
+    def test_raises_permanent_exception(self):
+        def permanent_fail():
+            raise RuntimeError("Permanent")
+
+        with self.assertRaises(RuntimeError):
+            retry_with_backoff(permanent_fail, max_retries=2, base_delay=0.001)
+
+
+class TestBatchCompareAndFormat(unittest.TestCase):
+
+    def test_batch_runs_and_formats_table(self):
+        with patch.object(_m, "compare_models") as mock_comp:
+            def _get_mock():
+                return {
+                    "gpt4o": {"response": "GPT-4o response content here", "latency": 0.5, "cost": 0.00045, "input_tokens": 10, "output_tokens": 20},
+                    "gpt4o_mini": {"response": "GPT-4o-Mini response content here", "latency": 0.3, "cost": 0.0000135, "input_tokens": 10, "output_tokens": 20},
+                    "gemini_flash": {"response": "Gemini response content here", "latency": 0.4, "cost": 0.00000675, "input_tokens": 10, "output_tokens": 20}
+                }
+            mock_comp.side_effect = _get_mock
+
+            results = batch_compare(["Q1", "Q2"])
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0]["prompt"], "Q1")
+
+            table = format_comparison_table(results)
+            self.assertIsInstance(table, str)
+            self.assertIn("Prompt", table)
+            self.assertIn("GPT-4o", table)
+            self.assertIn("Gemini-Flash", table)
+            self.assertIn("Q1", table)
 
 
 class TestStreamingChatbot(unittest.TestCase):
 
-    def test_function_exists_and_is_callable(self):
-        self.assertTrue(callable(streaming_chatbot))
-
     @patch("builtins.input", side_effect=["quit"])
-    @patch("openai.OpenAI")
-    def test_exits_on_quit(self, MockOpenAI, mock_input):
-        """Chatbot should exit cleanly when user types 'quit'."""
-        mock_client = MagicMock()
-        MockOpenAI.return_value = mock_client
+    @patch("google.genai.Client")
+    def test_exits_cleanly(self, MockClient, mock_input):
+        # Ensure it quits cleanly without entering infinite loop
         try:
             streaming_chatbot()
-        except StopIteration:
-            pass  # input() exhausted — acceptable
-        except NotImplementedError:
-            self.skipTest("streaming_chatbot not yet implemented")
-
-
-class TestRetryWithBackoff(unittest.TestCase):
-    def test_succeeds_on_first_try(self):
-        """retry_with_backoff returns value when fn succeeds immediately"""
-        result = _m.retry_with_backoff(lambda: 42)
-        self.assertEqual(result, 42)
-
-    def test_retries_on_transient_exception(self):
-        """retry_with_backoff retries and succeeds after transient failure"""
-        call_count = [0]
-        def flaky():
-            call_count[0] += 1
-            if call_count[0] < 2:
-                raise ValueError("transient")
-            return "ok"
-        result = _m.retry_with_backoff(flaky, max_retries=3, base_delay=0.01)
-        self.assertEqual(result, "ok")
-        self.assertEqual(call_count[0], 2)
-
-    def test_raises_after_max_retries(self):
-        """retry_with_backoff raises exception after exhausting retries"""
-        def always_fail():
-            raise RuntimeError("permanent failure")
-        with self.assertRaises(RuntimeError):
-            _m.retry_with_backoff(always_fail, max_retries=2, base_delay=0.01)
-
-
-class TestBatchCompare(unittest.TestCase):
-    def test_returns_correct_length(self):
-        """batch_compare returns one result per prompt"""
-        with patch.object(_m, 'compare_models', return_value={
-            'gpt4o_response': 'a', 'mini_response': 'b',
-            'gpt4o_latency': 0.1, 'mini_latency': 0.2,
-            'gpt4o_cost_estimate': 0.001
-        }):
-            results = _m.batch_compare(["q1", "q2", "q3"])
-            self.assertEqual(len(results), 3)
-
-    def test_result_contains_prompt_key(self):
-        """each result dict contains the original prompt"""
-        with patch.object(_m, 'compare_models', return_value={
-            'gpt4o_response': 'a', 'mini_response': 'b',
-            'gpt4o_latency': 0.1, 'mini_latency': 0.2,
-            'gpt4o_cost_estimate': 0.001
-        }):
-            results = _m.batch_compare(["hello"])
-            self.assertIn('prompt', results[0])
-            self.assertEqual(results[0]['prompt'], 'hello')
-
-
-class TestFormatComparisonTable(unittest.TestCase):
-    def test_returns_string(self):
-        """format_comparison_table returns a string"""
-        sample = [{
-            'prompt': 'test prompt', 'gpt4o_response': 'response A',
-            'mini_response': 'response B', 'gpt4o_latency': 1.0,
-            'mini_latency': 1.2, 'gpt4o_cost_estimate': 0.002
-        }]
-        result = _m.format_comparison_table(sample)
-        self.assertIsInstance(result, str)
-
-    def test_contains_column_headers(self):
-        """table contains expected column headers"""
-        sample = [{
-            'prompt': 'q', 'gpt4o_response': 'a', 'mini_response': 'b',
-            'gpt4o_latency': 0.5, 'mini_latency': 0.6, 'gpt4o_cost_estimate': 0.001
-        }]
-        result = _m.format_comparison_table(sample)
-        self.assertIn('Prompt', result)
-        self.assertIn('GPT-4o', result)
-        self.assertIn('Mini', result)
+        except SystemExit:
+            pass
 
 
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()
